@@ -94,7 +94,7 @@ button{cursor:pointer}
 <script src="https://www.gstatic.com/firebasejs/12.2.1/firebase-database-compat.js"></script>
 <script>
 const firebaseConfig={apiKey:"AIzaSyC5ahxKf3kgnj9jAoFqlvDD-r8k-XOJgys",authDomain:"pcm-82e81.firebaseapp.com",projectId:"pcm-82e81",storageBucket:"pcm-82e81.firebasestorage.app",messagingSenderId:"1076103861910",appId:"1:1076103861910:web:c284238dcd6bf12b50d4b7",measurementId:"G-L2XZ7H11QY",databaseURL:"https://pcm-82e81-default-rtdb.firebaseio.com"};
-let firebaseAuth=null, firebaseDB=null, syncReady=false, syncBusy=false, syncTimer=null, syncStarted=false;
+let firebaseAuth=null, firebaseDB=null, syncReady=false, syncBusy=false, syncTimer=null, syncStarted=false, syncPromise=null, syncLastError='';
 try{firebase.initializeApp(firebaseConfig);firebaseAuth=firebase.auth();firebaseDB=firebase.database();}catch(e){console.warn("Firebase init failed",e);}
 const KEY='pcm_v3_data';
 const DEFAULT_DATA={students:[],attendance:{},fees:[],results:[],routine:[],password:'897105'};
@@ -164,44 +164,65 @@ function scheduleCloudSave(){
 }
 function persist(){localStorage.setItem(KEY,JSON.stringify(data));updateHome();scheduleCloudSave()}
 async function startCloudSync(){
-  if(syncStarted)return syncReady;
+  if(syncReady)return true;
+  if(syncPromise)return syncPromise;
   syncStarted=true;
-  if(!firebaseAuth||!firebaseDB)return false;
-  try{
-    if(!firebaseAuth.currentUser)await firebaseAuth.signInAnonymously();
-    await syncPassword();
-    const ref=firebaseDB.ref('pcm_v3_data');
-    const snap=await ref.once('value');
-    const cloud=snap.val();
-    if(cloud&&typeof cloud==='object'){
-      data=mergeData(data,cloud);
-      localStorage.setItem(KEY,JSON.stringify(data));
-    }
-    syncReady=true;
-    await pushCloud();
-    ref.on('value',snap=>{
-      if(syncBusy)return;
-      const remote=snap.val();
-      if(!remote||typeof remote!=='object')return;
-      const merged=mergeData(data,remote);
-      const before=JSON.stringify(data);
-      const after=JSON.stringify(merged);
-      if(before!==after){
-        data=merged;
-        localStorage.setItem(KEY,JSON.stringify(data));
-        updateHome();
-        if(document.getElementById('students')?.classList.contains('active'))renderStudents();
-        if(document.getElementById('fees')?.classList.contains('active'))renderFees();
-        if(document.getElementById('attendance')?.classList.contains('active'))renderAttendance();
-        if(document.getElementById('results')?.classList.contains('active'))renderResults();
-        if(document.getElementById('routine')?.classList.contains('active'))renderRoutine();
-        if(document.getElementById('reports')?.classList.contains('active'))renderReports();
+  syncPromise=(async()=>{
+    if(!firebaseDB){syncLastError='Firebase Database unavailable';return false;}
+    try{
+      // Anonymous Auth is helpful when Firebase rules require authentication,
+      // but it must never block the data sync when the database is readable/writable.
+      if(firebaseAuth&&!firebaseAuth.currentUser){
+        try{await firebaseAuth.signInAnonymously();console.log('PCM anonymous auth ready');}
+        catch(authErr){console.warn('PCM anonymous auth failed; continuing with database sync.',authErr);}
       }
-    });
-    updateHome();
-    console.log('PCM cloud sync ready');
-    return true;
-  }catch(e){console.warn('PCM cloud sync unavailable. Local data kept.',e);return false;}
+
+      // Password sync is optional; a password-sync error must not stop student/fee data sync.
+      try{await syncPassword();}
+      catch(passErr){console.warn('PCM password sync skipped.',passErr);}
+
+      const ref=firebaseDB.ref('pcm_v3_data');
+      const snap=await ref.once('value');
+      const cloud=snap.val();
+      if(cloud&&typeof cloud==='object'){
+        data=mergeData(data,cloud);
+        localStorage.setItem(KEY,JSON.stringify(data));
+      }
+
+      syncReady=true;
+      syncLastError='';
+      await pushCloud();
+
+      ref.off('value');
+      ref.on('value',snap=>{
+        if(syncBusy)return;
+        const remote=snap.val();
+        if(!remote||typeof remote!=='object')return;
+        const merged=mergeData(data,remote);
+        const before=JSON.stringify(data);
+        const after=JSON.stringify(merged);
+        if(before!==after){
+          data=merged;
+          localStorage.setItem(KEY,JSON.stringify(data));
+          updateHome();
+          if(document.getElementById('students')?.classList.contains('active'))renderStudents();
+          if(document.getElementById('fees')?.classList.contains('active'))renderFees();
+          if(document.getElementById('attendance')?.classList.contains('active'))renderAttendance();
+          if(document.getElementById('results')?.classList.contains('active'))renderResults();
+          if(document.getElementById('routine')?.classList.contains('active'))renderRoutine();
+          if(document.getElementById('reports')?.classList.contains('active'))renderReports();
+        }
+      });
+      updateHome();
+      console.log('PCM cloud sync ready');
+      return true;
+    }catch(e){
+      syncLastError=e&&e.message?e.message:String(e);
+      console.warn('PCM cloud sync unavailable. Local data kept.',e);
+      return false;
+    }finally{syncPromise=null;}
+  })();
+  return syncPromise;
 }
 async function login(){const u=document.getElementById('user').value.trim();const p=document.getElementById('pass').value;await startCloudSync();if(u!=='admin'||p!==data.password){alert('Username বা Password ভুল।');return;}document.getElementById('login').classList.add('hidden');document.getElementById('app').style.display='block';document.getElementById('adminName').textContent='Admin';await init();}function logout(){location.reload()}document.querySelectorAll('.nav').forEach(b=>b.onclick=()=>{document.querySelectorAll('.nav').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));document.getElementById(b.dataset.s).classList.add('active');if(b.dataset.s==='students')renderStudents();if(b.dataset.s==='attendance')renderAttendance();if(b.dataset.s==='fees')renderFees();if(b.dataset.s==='results')renderResults();if(b.dataset.s==='routine')renderRoutine();if(b.dataset.s==='reports')renderReports()});
 async function init(){attDate.value=new Date().toISOString().slice(0,10);updateHome();if(!syncStarted)await startCloudSync();updateHome();renderStudents()}function uid(){return 'PCM-'+Date.now().toString(36).toUpperCase()}function addStudent(){let n=sn.value.trim();if(!n)return alert('নাম দিন');let f=photo.files[0];let finish=(src)=>{data.students.push({id:uid(),name:n,roll:sr.value,class:sc.value,guardian:sg.value,phone:sp.value,fee:+sf.value||0,admissionMonth:sadmission.value||currentYM(),photo:src||''});persist();sn.value=sr.value=sg.value=sp.value=sf.value=sadmission.value='';photo.value='';renderStudents();alert('Student যোগ হয়েছে।')};if(f){let r=new FileReader();r.onload=()=>finish(r.result);r.readAsDataURL(f)}else finish('')}function renderStudents(){let q=(search.value||'').toLowerCase();let arr=data.students.filter(s=>(s.name+s.roll+s.phone+s.id+s.class).toLowerCase().includes(q));studentList.innerHTML=arr.map(s=>`<div class="card" style="margin:8px 0;display:flex;gap:12px;align-items:center"><img class="avatar" src="${s.photo||''}"><div style="flex:1"><b>${s.name}</b><div class="small">ID: ${s.id} • Roll: ${s.roll} • ${s.class}</div><div class="small">Guardian: ${s.guardian} • ${s.phone}</div></div><div class="actions"><button class="primary" onclick="viewProfile('${s.id}')">Profile দেখুন</button><button class="primary" onclick="sendGuardianSMS('${s.id}', '')">📩 SMS</button><button class="primary" onclick="editStudent('${s.id}')">Edit</button><button class="danger" onclick="delStudent('${s.id}')">Delete</button></div></div>`).join('')||'<p class="muted">কোনো Student নেই।'}function viewProfile(id){let s=data.students.find(x=>x.id===id);if(!s)return;alert(`Student Profile\n\nনাম: ${s.name}\nID: ${s.id}\nশ্রেণি: ${s.class}\nরোল: ${s.roll}\nঅভিভাবক: ${s.guardian}\nফোন: ${s.phone}\nমাসিক ফি: ৳${s.fee}`)}function editStudent(id){let s=data.students.find(x=>x.id===id);if(!s)return;sn.value=s.name;sr.value=s.roll;sc.value=s.class;sg.value=s.guardian;sp.value=s.phone;sf.value=s.fee;sadmission.value=s.admissionMonth||currentYM();editId.value=id;updateBtn.classList.remove('hidden');cancelEditBtn.classList.remove('hidden');document.querySelector('#students .formbox').scrollIntoView({behavior:'smooth'})}function updateStudent(){let s=data.students.find(x=>x.id===editId.value);if(!s)return;s.name=sn.value.trim();s.roll=sr.value;s.class=sc.value;s.guardian=sg.value;s.phone=sp.value;s.fee=+sf.value||0;s.admissionMonth=sadmission.value||s.admissionMonth||currentYM();persist();cancelEdit();renderStudents();alert('Profile সংশোধন করে Update করা হয়েছে।')}function cancelEdit(){sn.value=sr.value=sg.value=sp.value=sf.value=sadmission.value='';editId.value='';updateBtn.classList.add('hidden');cancelEditBtn.classList.add('hidden')}function delStudent(id){if(confirm('Student মুছবেন?')){data.students=data.students.filter(s=>s.id!==id);persist();renderStudents()}}
